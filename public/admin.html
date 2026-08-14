@@ -483,36 +483,43 @@
             });
         }
 
+        async function prepareWhatsAppImageFile(fileUrl, originalFilename) {
+            const response = await fetch(fileUrl, { credentials: 'same-origin' });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+            const sourceBlob = await response.blob();
+            if (!sourceBlob.type.startsWith('image/')) throw new Error('O arquivo não é uma imagem.');
+
+            let imageBlob = sourceBlob;
+            if (sourceBlob.type !== 'image/jpeg') {
+                const bitmap = await createImageBitmap(sourceBlob);
+                const canvas = document.createElement('canvas');
+                canvas.width = bitmap.width;
+                canvas.height = bitmap.height;
+                const context = canvas.getContext('2d', { alpha: false });
+                context.drawImage(bitmap, 0, 0);
+                if (typeof bitmap.close === 'function') bitmap.close();
+                imageBlob = await new Promise((resolve, reject) => {
+                    canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('Falha ao converter a imagem.')), 'image/jpeg', 0.92);
+                });
+            }
+
+            const baseName = String(originalFilename || 'comprovante')
+                .replace(/\\.[^.]+$/, '')
+                .replace(/[^a-zA-Z0-9_-]+/g, '_')
+                .replace(/^_+|_+$/g, '') || 'comprovante';
+            const filename = `${baseName}.jpg`;
+            const file = new File([imageBlob], filename, { type: 'image/jpeg', lastModified: Date.now() });
+            return { file, filename, imageBlob };
+        }
+
         async function downloadImageAsWhatsAppPhoto(fileUrl, originalFilename) {
             try {
-                const response = await fetch(fileUrl, { credentials: 'same-origin' });
-                if (!response.ok) throw new Error(`HTTP ${response.status}`);
-
-                const sourceBlob = await response.blob();
-                if (!sourceBlob.type.startsWith('image/')) throw new Error('O arquivo não é uma imagem.');
-
-                let imageBlob = sourceBlob;
-                if (sourceBlob.type !== 'image/jpeg') {
-                    const bitmap = await createImageBitmap(sourceBlob);
-                    const canvas = document.createElement('canvas');
-                    canvas.width = bitmap.width;
-                    canvas.height = bitmap.height;
-                    const context = canvas.getContext('2d', { alpha: false });
-                    context.drawImage(bitmap, 0, 0);
-                    if (typeof bitmap.close === 'function') bitmap.close();
-                    imageBlob = await new Promise((resolve, reject) => {
-                        canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('Falha ao converter a imagem.')), 'image/jpeg', 0.92);
-                    });
-                }
-
-                const baseName = String(originalFilename || 'comprovante')
-                    .replace(/\\.[^.]+$/, '')
-                    .replace(/[^a-zA-Z0-9_-]+/g, '_')
-                    .replace(/^_+|_+$/g, '') || 'comprovante';
+                const { imageBlob, filename } = await prepareWhatsAppImageFile(fileUrl, originalFilename);
                 const objectUrl = URL.createObjectURL(imageBlob);
                 const link = document.createElement('a');
                 link.href = objectUrl;
-                link.download = `${baseName}.jpg`;
+                link.download = filename;
                 document.body.appendChild(link);
                 link.click();
                 link.remove();
@@ -520,6 +527,25 @@
             } catch (error) {
                 console.error('Erro ao preparar imagem para o WhatsApp:', error);
                 alert('Não foi possível converter a imagem. Tente usar o botão Visualizar e salve a imagem como JPG.');
+            }
+        }
+
+        async function shareImageAsWhatsAppPhoto(fileUrl, originalFilename) {
+            try {
+                const { file } = await prepareWhatsAppImageFile(fileUrl, originalFilename);
+                const shareData = { files: [file], title: 'Comprovante', text: '' };
+                const canShareFiles = navigator.share && (!navigator.canShare || navigator.canShare({ files: [file] }));
+
+                if (!canShareFiles) {
+                    alert('Este navegador não permite compartilhar a imagem diretamente. Use “Baixar imagem (JPG)” e, no WhatsApp, selecione a imagem pela Galeria/Fotos, não por Documentos.');
+                    return;
+                }
+
+                await navigator.share(shareData);
+            } catch (error) {
+                if (error && error.name === 'AbortError') return;
+                console.error('Erro ao compartilhar imagem como foto:', error);
+                alert('Não foi possível abrir o compartilhamento nativo. Use “Baixar imagem (JPG)” e selecione a imagem pela Galeria/Fotos no WhatsApp.');
             }
         }
 
@@ -575,12 +601,24 @@
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
                                 Visualizar
                             </a>
-                            <a href="${fileUrl}" download="${filename}" class="download-btn${isImage ? ' image-download-link' : ''}">
+                            ${isImage ? `<a href="#" class="download-btn image-share-link">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v7a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-7"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>
+                                Compartilhar como foto
+                            </a>` : ''}
+                            <a href="${fileUrl}" download="${filename}" class="download-btn image-download-link">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
                                 ${isImage ? 'Baixar imagem (JPG)' : 'Baixar arquivo'}
                             </a>
                         </div>` : `<div class="attachment-actions-row"><span style="font-size:0.75rem;color:#ef4444;">Arquivo sem URL disponível no servidor</span></div>`}
                     `;
+
+                    const imageShareLink = div.querySelector('.image-share-link');
+                    if (imageShareLink) {
+                        imageShareLink.onclick = event => {
+                            event.preventDefault();
+                            shareImageAsWhatsAppPhoto(fileUrl, filename);
+                        };
+                    }
 
                     const imageDownloadLink = div.querySelector('.image-download-link');
                     if (imageDownloadLink) {
@@ -764,12 +802,24 @@
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
                                 Visualizar
                             </a>
-                            <a href="${fileUrl}" download="${filename}" class="download-btn${isImage ? ' image-download-link' : ''}">
+                            ${isImage ? `<a href="#" class="download-btn image-share-link">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v7a1 1 0 0 0 1 1h14a1 1 0 0 0 1-1v-7"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>
+                                Compartilhar como foto
+                            </a>` : ''}
+                            <a href="${fileUrl}" download="${filename}" class="download-btn image-download-link">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
                                 ${isImage ? 'Baixar imagem (JPG)' : 'Baixar arquivo'}
                             </a>
                         </div>` : `<div class="attachment-actions-row"><span style="font-size:0.75rem;color:#ef4444;">Arquivo sem URL disponível no servidor</span></div>`}
                     `;
+
+                    const imageShareLink = block.querySelector('.image-share-link');
+                    if (imageShareLink) {
+                        imageShareLink.onclick = event => {
+                            event.preventDefault();
+                            shareImageAsWhatsAppPhoto(fileUrl, filename);
+                        };
+                    }
 
                     const imageDownloadLink = block.querySelector('.image-download-link');
                     if (imageDownloadLink) {
