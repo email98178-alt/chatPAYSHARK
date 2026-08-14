@@ -1537,7 +1537,10 @@ async function requestPixCode() {
     }
 
     window._currentPixTransactionId = data.transactionId || null;
-    window._currentPixExpiresAt = data.expiresAt || null;
+    // O cronômetro exibido no card é sempre local e fixo em 15 minutos.
+    // A data do gateway fica separada apenas para referência futura.
+    window._currentPixProviderExpiresAt = data.expiresAt || null;
+    window._currentPixExpiresAt = null;
     return data.pixCode;
   })();
 
@@ -2092,16 +2095,68 @@ function showOrderConfirmation() {
 
 
 // ── DELIVERY STEPS / PIX ─────────────────────────────
+const PIX_CARD_DURATION_SECONDS = 15 * 60;
+
+function markPixCardExpired(card) {
+  const timerDisplay = card && card.querySelector('#pixTimerDisplay');
+  if (timerDisplay) {
+    timerDisplay.textContent = 'Expirado';
+    timerDisplay.className = 'pix-timer danger';
+  }
+
+  const copyBtn = card && card.querySelector('#pixCopyBtn');
+  if (copyBtn) {
+    copyBtn.disabled = true;
+    copyBtn.style.opacity = '0.5';
+    copyBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg> PIX expirado';
+  }
+}
+
+function startPixCardCountdown(card, expiryMs) {
+  const timerDisplay = card && card.querySelector('#pixTimerDisplay');
+  if (!timerDisplay) return;
+
+  if (card._pixTimerInterval) clearInterval(card._pixTimerInterval);
+
+  const updateTimer = () => {
+    const remainingSeconds = Math.max(0, Math.ceil((expiryMs - Date.now()) / 1000));
+    if (remainingSeconds <= 0) {
+      clearInterval(card._pixTimerInterval);
+      card._pixTimerInterval = null;
+      markPixCardExpired(card);
+      return;
+    }
+
+    timerDisplay.textContent = formatExpiryTime(remainingSeconds);
+    timerDisplay.className = remainingSeconds <= 60
+      ? 'pix-timer danger'
+      : remainingSeconds <= 180
+        ? 'pix-timer warning'
+        : 'pix-timer';
+  };
+
+  updateTimer();
+  if (expiryMs > Date.now()) {
+    card._pixTimerInterval = setInterval(updateTimer, 1000);
+  }
+}
+
+function getPixCardExpiryMs() {
+  const savedExpiryMs = new Date(window._currentPixExpiresAt || '').getTime();
+  // Se já existe um prazo salvo, inclusive vencido, nunca reinicia o mesmo PIX.
+  if (Number.isFinite(savedExpiryMs)) return savedExpiryMs;
+  return Date.now() + PIX_CARD_DURATION_SECONDS * 1000;
+}
+
 function showDeliverySteps(pixCode, expiresAt) {
   const card = document.createElement('div');
   card.className = 'pix-card';
-  
-  // Determine if we have a real expiresAt from the API
-  const hasRealExpiry = !!(expiresAt && new Date(expiresAt).getTime() > Date.now());
-  
-  // If no real expiresAt, use fixed 15:00
-  const expiryDate = hasRealExpiry ? new Date(expiresAt) : null;
-  const totalSeconds = hasRealExpiry ? Math.max(0, Math.floor((expiryDate - Date.now()) / 1000)) : 900; // 900 = 15 min in seconds
+
+  // O card usa sempre uma janela local fixa de 15 minutos.
+  // Isso garante o funcionamento mesmo quando o gateway não envia expiresAt.
+  const expiryMs = getPixCardExpiryMs();
+  window._currentPixExpiresAt = new Date(expiryMs).toISOString();
+  const totalSeconds = Math.max(0, Math.ceil((expiryMs - Date.now()) / 1000));
   
   // Build HTML with conditional QR section
   let html = `
@@ -2110,7 +2165,7 @@ function showDeliverySteps(pixCode, expiresAt) {
         <div class="pix-logo">PIX</div>
         <div><div class="pix-brand-label">Pagamento Instantâneo</div><div class="pix-brand-sub">Diskgas Oficial</div></div>
       </div>
-      <div class="pix-expiry"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> <span class="pix-timer${hasRealExpiry ? '' : ''}" id="pixTimerDisplay">${hasRealExpiry ? formatExpiryTime(totalSeconds) : '15:00'}</span></div>
+      <div class="pix-expiry"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> <span class="pix-timer" id="pixTimerDisplay">${formatExpiryTime(totalSeconds)}</span></div>
     </div>
     <div class="pix-price-hero">
       <div class="pix-price-eyebrow">Valor do pedido</div>
@@ -2160,30 +2215,9 @@ function showDeliverySteps(pixCode, expiresAt) {
   // Store pixCode for copy
   card._pixCode = pixCode;
   
-  // Start countdown timer only if we have a real expiresAt
-  if (hasRealExpiry) {
-    let remainingSeconds = totalSeconds;
-    const timerDisplay = card.querySelector('#pixTimerDisplay');
-    if (timerDisplay && remainingSeconds > 0) {
-      const timerInterval = setInterval(() => {
-        remainingSeconds--;
-        if (remainingSeconds <= 0) {
-          clearInterval(timerInterval);
-          timerDisplay.textContent = 'Expirado';
-          timerDisplay.className = 'pix-timer danger';
-          const cb = card.querySelector('#pixCopyBtn');
-          if (cb) { cb.disabled = true; cb.style.opacity = '0.5'; cb.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg> PIX expirado'; }
-          return;
-        }
-        timerDisplay.textContent = formatExpiryTime(remainingSeconds);
-        if (remainingSeconds <= 60) {
-          timerDisplay.className = 'pix-timer danger';
-        } else if (remainingSeconds <= 180) {
-          timerDisplay.className = 'pix-timer warning';
-        }
-      }, 1000);
-    }
-  }
+  // O contador é iniciado sempre, inclusive quando expiresAt do gateway é nulo.
+  startPixCardCountdown(card, expiryMs);
+  saveChatHistory();
   
   // Robust copy button
   const copyBtn = card.querySelector('#pixCopyBtn');
@@ -2767,9 +2801,10 @@ function lockBackButton() {
       }
     });
 
-    // Restore QR Code and timer if PIX card exists
+    // Restore QR Code and the fixed 15-minute timer if PIX card exists
     const pixCard = msgsEl.querySelector('.pix-card');
-    const hasRealExpiryRestore = window._currentPixExpiresAt && new Date(window._currentPixExpiresAt).getTime() > Date.now();
+    const savedExpiryMs = new Date(window._currentPixExpiresAt || '').getTime();
+    const hasSavedExpiry = Number.isFinite(savedExpiryMs);
     
     if (pixCard && window._currentPixCode) {
       // Restore QR Code only if library is available
@@ -2783,35 +2818,12 @@ function lockBackButton() {
           }
         });
       }
-      
-      // Restore timer only if we have a real expiresAt
-      if (hasRealExpiryRestore) {
-        const timerDisplay = pixCard.querySelector('#pixTimerDisplay');
-        if (timerDisplay) {
-          const expiryDate = new Date(window._currentPixExpiresAt);
-          const remaining = Math.max(0, Math.floor((expiryDate - Date.now()) / 1000));
-          timerDisplay.textContent = formatExpiryTime(remaining);
-          if (remaining <= 60) timerDisplay.className = 'pix-timer danger';
-          else if (remaining <= 180) timerDisplay.className = 'pix-timer warning';
-          if (remaining > 0) {
-            let rem = remaining;
-            const ti = setInterval(() => {
-              rem--;
-              if (rem <= 0) {
-                clearInterval(ti);
-                timerDisplay.textContent = 'Expirado';
-                timerDisplay.className = 'pix-timer danger';
-                const cb = pixCard.querySelector('#pixCopyBtn');
-                if (cb) { cb.disabled = true; cb.style.opacity = '0.5'; }
-                return;
-              }
-              timerDisplay.textContent = formatExpiryTime(rem);
-              if (rem <= 60) timerDisplay.className = 'pix-timer danger';
-              else if (rem <= 180) timerDisplay.className = 'pix-timer warning';
-            }, 1000);
-          }
-        }
-      }
+
+      // Retoma o prazo salvo; para cards antigos sem prazo, cria 15 minutos uma única vez.
+      const expiryMs = hasSavedExpiry ? savedExpiryMs : Date.now() + PIX_CARD_DURATION_SECONDS * 1000;
+      window._currentPixExpiresAt = new Date(expiryMs).toISOString();
+      startPixCardCountdown(pixCard, expiryMs);
+      saveChatHistory();
     }
     
     const pixCopyBtn = msgsEl.querySelector('#pixCopyBtn');
